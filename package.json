@@ -22,6 +22,7 @@
     "@types/bun": "latest",
     "typescript": "^5.0.0"
   },
+  "author": "jwcrystal",
   "keywords": ["opencode", "plugin", "observer", "vision", "image-analysis"],
   "license": "MIT",
   "repository": {
