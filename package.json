@@ -5,7 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -24,10 +26,16 @@
     "typescript": "^5.0.0"
   },
   "author": "jwcrystal",
-  "keywords": ["opencode", "plugin", "observer", "vision", "image-analysis"],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "observer",
+    "vision",
+    "image-analysis"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jwcrystal/opencode-observer"
+    "url": "git+https://github.com/jwcrystal/opencode-observer.git"
   }
 }
