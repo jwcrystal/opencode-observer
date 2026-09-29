@@ -1,4 +1,3 @@
-import type { Plugin } from '@opencode-ai/plugin';
 import {
   DEFAULT_OBSERVER_MODEL,
   OBSERVER_SYSTEM_HINT,
@@ -6,8 +5,10 @@ import {
 } from './agent';
 import { processImageAttachments } from './image-hook';
 import type { MessagesTransformOutput } from './types';
+import { createObserverPlugin } from './v2';
+import type { ObserverPluginOptions } from './v2';
 
-// ── Plugin state ──────────────────────────────────────────────────
+// ── Plugin state (V1 path) ────────────────────────────────────────
 
 let workDir: string | null = null;
 
@@ -15,11 +16,9 @@ function ensureWorkDir(): string {
   return workDir ?? process.cwd();
 }
 
-// ── Plugin entry ──────────────────────────────────────────────────
+// ── V1 hooks ──────────────────────────────────────────────────────
 
-const plugin = (async (input) => {
-  workDir = input.directory;
-
+function createV1Hooks() {
   return {
     // Register @observer as a subagent
     config: async (cfg: {
@@ -61,6 +60,26 @@ const plugin = (async (input) => {
       }
     },
   };
-}) satisfies Plugin;
+}
 
-export default plugin;
+// ── Dual entry (V2 setup + V1 server) ─────────────────────────────
+//
+// OpenCode 2.x reads `setup` and ignores `server`; OpenCode 1.x
+// (>= 1.18.29, object entrypoints) reads `server` and ignores `setup`.
+// See https://opencode.ai/v2/docs/build/plugins/migrate-v1
+
+const observerV2 = createObserverPlugin();
+
+export type { ObserverPluginOptions };
+
+const entry = {
+  ...observerV2,
+
+  /** V1 entrypoint — returns the V1 hook map. */
+  server: async (input?: { directory?: string }) => {
+    if (input?.directory) workDir = input.directory;
+    return createV1Hooks();
+  },
+};
+
+export default entry;

@@ -27,25 +27,32 @@ function partAsRecord(p: unknown): Record<string, unknown> {
 }
 
 describe('plugin loading', () => {
-  test('loads and returns a plugin factory', async () => {
+  test('loads and returns a dual V1/V2 entry', async () => {
     const mod = await import('../dist/index.js');
     expect(mod.default).toBeDefined();
-    expect(typeof mod.default).toBe('function');
+    expect(typeof mod.default).toBe('object');
+    expect(mod.default.id).toBe('opencode-observer');
+    expect(typeof mod.default.setup).toBe('function'); // V2 entry
+    expect(typeof mod.default.server).toBe('function'); // V1 entry
   });
 
-  test('factory returns hooks with all three keys', async () => {
+  test('V1 server() returns hooks with all three keys', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     expect(hooks).toBeDefined();
     expect(typeof hooks.config).toBe('function');
-    expect(typeof hooks['experimental.chat.messages.transform']).toBe('function');
+    expect(typeof hooks['experimental.chat.messages.transform']).toBe(
+      'function',
+    );
     expect(typeof hooks['experimental.chat.system.transform']).toBe('function');
   });
 
   test('config hook registers observer subagent with gpt-4o model', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
-    const config = hooks.config as (c: Record<string, unknown>) => Promise<void>;
+    const hooks: Hooks = await mod.default.server(makeMockInput());
+    const config = hooks.config as (
+      c: Record<string, unknown>,
+    ) => Promise<void>;
 
     // Default model (no override)
     const cfg: Record<string, unknown> = {};
@@ -63,7 +70,8 @@ describe('plugin loading', () => {
       agent: { observer: { model: TEST_MODEL } },
     };
     await config(cfg2);
-    const observer2 = ((cfg2.agent as Record<string, unknown>).observer ?? {}) as Record<string, unknown>;
+    const observer2 = ((cfg2.agent as Record<string, unknown>).observer ??
+      {}) as Record<string, unknown>;
     expect(observer2.model).toBe(TEST_MODEL);
     expect(observer2.mode).toBe('subagent');
     expect(observer2.temperature).toBe(0.1);
@@ -71,10 +79,15 @@ describe('plugin loading', () => {
 
   test('messages.transform strips image parts and injects hint', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     const transform = hooks['experimental.chat.messages.transform'] as (
       _input: unknown,
-      output: { messages: Array<{ info: { role: string }; parts: Array<Record<string, unknown>> }> },
+      output: {
+        messages: Array<{
+          info: { role: string };
+          parts: Array<Record<string, unknown>>;
+        }>;
+      },
     ) => Promise<void>;
 
     const output = {
@@ -97,25 +110,28 @@ describe('plugin loading', () => {
 
     const hint = partAsRecord(parts[1]);
     expect(hint.type).toBe('text');
-    expect((hint.text as string)).toContain('@observer');
-    expect((hint.text as string)).toContain('Image attachment detected');
+    expect(hint.text as string).toContain('@observer');
+    expect(hint.text as string).toContain('Image attachment detected');
   });
 
   test('messages.transform skips non-user messages', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     const transform = hooks['experimental.chat.messages.transform'] as (
       _input: unknown,
-      output: { messages: Array<{ info: { role: string }; parts: Array<Record<string, unknown>> }> },
+      output: {
+        messages: Array<{
+          info: { role: string };
+          parts: Array<Record<string, unknown>>;
+        }>;
+      },
     ) => Promise<void>;
 
     const output = {
       messages: [
         {
           info: { role: 'assistant' },
-          parts: [
-            { type: 'image', url: 'data:image/png;base64,iVBORw0KGgo=' },
-          ],
+          parts: [{ type: 'image', url: 'data:image/png;base64,iVBORw0KGgo=' }],
         },
       ],
     };
@@ -128,7 +144,7 @@ describe('plugin loading', () => {
 
   test('system.transform injects observer hint', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     const sysTransform = hooks['experimental.chat.system.transform'] as (
       _input: unknown,
       output: { system: string[] },
@@ -143,13 +159,15 @@ describe('plugin loading', () => {
 
   test('system.transform does not duplicate hint', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     const sysTransform = hooks['experimental.chat.system.transform'] as (
       _input: unknown,
       output: { system: string[] },
     ) => Promise<void>;
 
-    const output = { system: ['You are a helpful assistant.', OBSERVER_SYSTEM_HINT] };
+    const output = {
+      system: ['You are a helpful assistant.', OBSERVER_SYSTEM_HINT],
+    };
     await sysTransform({}, output);
 
     expect(output.system.length).toBe(2);
@@ -157,10 +175,15 @@ describe('plugin loading', () => {
 
   test('messages.transform saves image data to disk and includes path in hint', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     const transform = hooks['experimental.chat.messages.transform'] as (
       _input: unknown,
-      output: { messages: Array<{ info: { role: string; sessionID?: string }; parts: Array<Record<string, unknown>> }> },
+      output: {
+        messages: Array<{
+          info: { role: string; sessionID?: string };
+          parts: Array<Record<string, unknown>>;
+        }>;
+      },
     ) => Promise<void>;
 
     // Minimal valid 1x1 PNG
@@ -171,9 +194,7 @@ describe('plugin loading', () => {
       messages: [
         {
           info: { role: 'user', sessionID: 'test-session-123' },
-          parts: [
-            { type: 'image', url: tinyPng, name: 'test-image.png' },
-          ],
+          parts: [{ type: 'image', url: tinyPng, name: 'test-image.png' }],
         },
       ],
     };
@@ -181,7 +202,7 @@ describe('plugin loading', () => {
     await transform({}, output);
 
     const hint = partAsRecord(output.messages[0].parts[0]);
-    expect((hint.text as string)).toContain('Saved to:');
+    expect(hint.text as string).toContain('Saved to:');
 
     // Verify the file was actually saved to disk
     const imagesDir = join(TEST_DIR, '.opencode', 'images', 'test-session-123');
@@ -193,19 +214,22 @@ describe('plugin loading', () => {
 
   test('messages.transform handles file-type image parts', async () => {
     const mod = await import('../dist/index.js');
-    const hooks: Hooks = await mod.default(makeMockInput());
+    const hooks: Hooks = await mod.default.server(makeMockInput());
     const transform = hooks['experimental.chat.messages.transform'] as (
       _input: unknown,
-      output: { messages: Array<{ info: { role: string }; parts: Array<Record<string, unknown>> }> },
+      output: {
+        messages: Array<{
+          info: { role: string };
+          parts: Array<Record<string, unknown>>;
+        }>;
+      },
     ) => Promise<void>;
 
     const output = {
       messages: [
         {
           info: { role: 'user' },
-          parts: [
-            { type: 'file', mime: 'image/png', name: 'screenshot.png' },
-          ],
+          parts: [{ type: 'file', mime: 'image/png', name: 'screenshot.png' }],
         },
       ],
     };
@@ -215,6 +239,6 @@ describe('plugin loading', () => {
     const parts = output.messages[0].parts;
     expect(parts.length).toBe(1);
     expect(partAsRecord(parts[0]).type).toBe('text');
-    expect((partAsRecord(parts[0]).text as string)).toContain('@observer');
+    expect(partAsRecord(parts[0]).text as string).toContain('@observer');
   });
 });

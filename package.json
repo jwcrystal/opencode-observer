@@ -1,6 +1,6 @@
 {
   "name": "opencode-observer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Visual analysis plugin for OpenCode — isolates image/PDF bytes from the main context by delegating to a vision-capable @observer subagent",
   "type": "module",
   "main": "dist/index.js",
@@ -17,7 +17,8 @@
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.17.9",
+    "@opencode-ai/plugin": "^1.18.29",
+    "@opencode/plugin": "^2.0.18",
     "@biomejs/biome": "^1.9.4",
     "@types/bun": "latest",
     "typescript": "^5.0.0"

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmdirSync,
   statSync,
@@ -9,26 +10,49 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, extname, join } from 'node:path';
-import type { MessageWithParts, MessagesTransformOutput, Part } from './types';
+import type {
+  MessageWithParts,
+  MessagesTransformOutput,
+  Part,
+  V2ContentPart,
+  V2Message,
+  V2SessionContextEvent,
+} from './types';
 
 // ── Debounce cleanup ──────────────────────────────────────────────
 const lastCleanupByDir = new Map<string, number>();
 const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
+const IMAGE_EXT_RE = /\.(png|jpg|jpeg|gif|bmp|webp|svg|ico|tiff?|heic)$/i;
+
 // ── Image detection ───────────────────────────────────────────────
+/** V1: `{ type: "image" }` or `{ type: "file", mime/filename image }` parts. */
 function isImagePart(p: Part): boolean {
   if (p.type === 'image') return true;
   if (p.type === 'file') {
     const mime = p.mime;
     if (mime?.startsWith('image/')) return true;
     const filename = p.filename ?? p.name;
-    if (
-      filename &&
-      /\.(png|jpg|jpeg|gif|bmp|webp|svg|ico|tiff?|heic)$/i.test(filename)
-    )
-      return true;
+    if (filename && IMAGE_EXT_RE.test(filename)) return true;
   }
   return false;
+}
+
+function mediaMime(p: V2ContentPart): string | undefined {
+  const media = p.media;
+  return (
+    p.mediaType ?? media?.mediaType ?? media?.source?.mediaType ?? undefined
+  );
+}
+
+/** V2: `{ type: "media", ... }` content parts carrying image mime or filename. */
+function isImageMediaPart(p: V2ContentPart): boolean {
+  if (p.type !== 'media') return false;
+  const mime = mediaMime(p);
+  if (mime?.startsWith('image/')) return true;
+  if (p.media?.kind === 'image') return true;
+  const filename = p.filename ?? p.media?.source?.path;
+  return Boolean(filename && IMAGE_EXT_RE.test(filename));
 }
 
 // ── Data URL decoding ─────────────────────────────────────────────
@@ -36,6 +60,31 @@ function decodeDataUrl(url: string): { mime: string; data: Buffer } | null {
   const match = url.match(/^data:([^;]+);base64,(.+)$/);
   if (!match) return null;
   return { mime: match[1], data: Buffer.from(match[2], 'base64') };
+}
+
+/**
+ * Decode a V2 media part payload. Bytes may arrive as a base64 string
+ * (optionally a data URL) or raw Uint8Array bytes, either flat on the part
+ * (`data`) or nested under `media.source` (`source.type === "base64"`).
+ */
+function decodeMediaPart(
+  p: V2ContentPart,
+): { mime: string; data: Buffer } | null {
+  const source = p.media?.source;
+  const raw = p.data ?? (source?.type === 'base64' ? source.data : undefined);
+  const mime = mediaMime(p) || 'image/png';
+  if (raw === undefined) return null;
+  if (raw instanceof Uint8Array) {
+    return { mime, data: Buffer.from(raw) };
+  }
+  if (typeof raw === 'string') {
+    if (raw.startsWith('data:')) {
+      const decoded = decodeDataUrl(raw);
+      if (decoded) return decoded;
+    }
+    return { mime, data: Buffer.from(raw, 'base64') };
+  }
+  return null;
 }
 
 function extFromMime(mime: string): string {
@@ -146,6 +195,40 @@ function writeUniqueFile(
   return null;
 }
 
+// ── Shared save logic ─────────────────────────────────────────────
+/** Save decoded image bytes under `<original>-<sha1-8><ext>` (dedup-friendly). */
+function saveDecodedImage(
+  targetDir: string,
+  filename: string | undefined,
+  decoded: { mime: string; data: Buffer },
+): string | null {
+  const hash = createHash('sha1')
+    .update(decoded.data)
+    .digest('hex')
+    .slice(0, 8);
+  const sanitizedFilename = filename ? sanitizeFilename(filename) : undefined;
+  const baseName = sanitizedFilename
+    ? sanitizedFilename.replace(/\.[^.]+$/, '') || 'image'
+    : 'image';
+  const ext = sanitizedFilename
+    ? extname(sanitizedFilename) || extFromMime(decoded.mime)
+    : extFromMime(decoded.mime);
+  return writeUniqueFile(targetDir, `${baseName}-${hash}${ext}`, decoded.data);
+}
+
+/** Ensure `.opencode/images/` and its `.gitignore` exist; returns the save dir. */
+function ensureImagesDir(workDir: string): string {
+  const saveDir = join(workDir, '.opencode', 'images');
+  const gitignorePath = join(workDir, '.opencode', '.gitignore');
+  try {
+    mkdirSync(saveDir, { recursive: true });
+    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, '*\n');
+  } catch {
+    // non-fatal
+  }
+  return saveDir;
+}
+
 // ── Image text hint ───────────────────────────────────────────────
 function buildObserverHint(savedPaths: string[]): string {
   const pathsText =
@@ -160,10 +243,10 @@ export interface ImageHookOptions {
 }
 
 /**
- * Process messages: detect image parts, save them to disk, strip image
+ * Process V1 messages: detect image parts, save them to disk, strip image
  * bytes, and insert a text hint suggesting @observer delegation.
  *
- * Called from `experimental.chat.messages.transform`.
+ * Called from V1 `experimental.chat.messages.transform`.
  */
 export function processImageAttachments(
   output: MessagesTransformOutput,
@@ -189,15 +272,7 @@ export function processImageAttachments(
     return;
   }
 
-  // Ensure save directory and .gitignore exist
-  const gitignorePath = join(workDir, '.opencode', '.gitignore');
-  try {
-    mkdirSync(saveDir, { recursive: true });
-    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, '*\n');
-  } catch {
-    // non-fatal
-  }
-
+  ensureImagesDir(workDir);
   cleanupAllSessions(saveDir);
 
   for (const { msg, imageParts } of messagesWithImages) {
@@ -213,26 +288,14 @@ export function processImageAttachments(
 
     const savedPaths: string[] = [];
     for (const p of imageParts) {
-      const url = p.url;
-      const filename = p.filename ?? p.name;
-      if (url) {
-        const decoded = decodeDataUrl(url);
+      if (p.url) {
+        const decoded = decodeDataUrl(p.url);
         if (decoded) {
-          const hash = createHash('sha1')
-            .update(decoded.data)
-            .digest('hex')
-            .slice(0, 8);
-          const sanitizedFilename = filename
-            ? sanitizeFilename(filename)
-            : undefined;
-          const baseName = sanitizedFilename
-            ? sanitizedFilename.replace(/\.[^.]+$/, '') || 'image'
-            : 'image';
-          const ext = sanitizedFilename
-            ? extname(sanitizedFilename) || extFromMime(decoded.mime)
-            : extFromMime(decoded.mime);
-          const name = `${baseName}-${hash}${ext}`;
-          const filePath = writeUniqueFile(targetDir, name, decoded.data);
+          const filePath = saveDecodedImage(
+            targetDir,
+            p.filename ?? p.name,
+            decoded,
+          );
           if (filePath) savedPaths.push(filePath);
         }
       }
@@ -243,5 +306,73 @@ export function processImageAttachments(
       ...msg.parts.filter((p) => !isImagePart(p)),
       { type: 'text', text: buildObserverHint(savedPaths) },
     ];
+  }
+}
+
+/**
+ * Process V2 session context: detect media image parts in user messages,
+ * save them to disk, strip image bytes, and insert a text hint suggesting
+ * @observer delegation.
+ *
+ * Called from the V2 `ctx.session.hook("context")` hook, which replaces
+ * both V1 experimental transform hooks.
+ */
+export function processV2ImageAttachments(
+  event: V2SessionContextEvent,
+  options: ImageHookOptions,
+): void {
+  const { workDir } = options;
+  const saveDir = join(workDir, '.opencode', 'images');
+  const messagesWithImages: Array<{
+    msg: V2Message;
+    mediaParts: V2ContentPart[];
+  }> = [];
+
+  for (const msg of event.messages) {
+    if (msg.role !== 'user') continue;
+    const content = msg.content as V2ContentPart[];
+    const mediaParts = content.filter(isImageMediaPart);
+    if (mediaParts.length > 0) {
+      messagesWithImages.push({ msg, mediaParts });
+    }
+  }
+
+  if (messagesWithImages.length === 0) {
+    if (existsSync(saveDir)) cleanupAllSessions(saveDir);
+    return;
+  }
+
+  ensureImagesDir(workDir);
+  cleanupAllSessions(saveDir);
+
+  const sessionSubdir = event.sessionID
+    ? sanitizeFilename(event.sessionID)
+    : undefined;
+  const targetDir = sessionSubdir ? join(saveDir, sessionSubdir) : saveDir;
+  try {
+    mkdirSync(targetDir, { recursive: true });
+  } catch {
+    // non-fatal
+  }
+
+  for (const { msg, mediaParts } of messagesWithImages) {
+    const content = msg.content as V2ContentPart[];
+    const savedPaths: string[] = [];
+    for (const p of mediaParts) {
+      const decoded = decodeMediaPart(p);
+      if (decoded) {
+        const filePath = saveDecodedImage(targetDir, p.filename, decoded);
+        if (filePath) savedPaths.push(filePath);
+      }
+    }
+
+    // Strip image media parts and inject observer hint. Mutate the array
+    // in place — Message instances may expose readonly properties.
+    const kept = content.filter((p) => !isImageMediaPart(p));
+    content.length = 0;
+    content.push(...kept, {
+      type: 'text',
+      text: buildObserverHint(savedPaths),
+    });
   }
 }

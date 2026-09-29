@@ -21,17 +21,49 @@ const OBSERVER_PROMPT = `You are Observer — a visual analysis specialist.
 - Prefer dedicated file tools for codebase inspection: glob/grep for discovery and read for file content.
 - Bash is allowed for non-mutating diagnostics and shell-native inspection when it is the clearest tool, but not for modifying files.`;
 
-export const OBSERVER_SYSTEM_HINT = `@observer is available for visual analysis of images, screenshots, PDFs, and diagrams. When image/<PII type="CASE_ID" id="50"/> are present and your model may not support them, delegate to @observer with the full file path.`;
+export const OBSERVER_SYSTEM_HINT =
+  '@observer is available for visual analysis of images, screenshots, PDFs, and diagrams. When images are present and your model may not support them, delegate to @observer with the full file path.';
 
 export const DEFAULT_OBSERVER_MODEL = 'openai/gpt-4o';
+
+export const OBSERVER_TEMPERATURE = 0.1;
+
+/** Agent id used in both V1 config and V2 agent transforms. */
+export const OBSERVER_AGENT_ID = 'observer';
+
+export const OBSERVER_DESCRIPTION =
+  'Visual analysis. Use for interpreting images, screenshots, PDFs, and diagrams — extracts structured observations without loading raw files into main context. Requires a vision-capable model.';
 
 export function createObserverAgentConfig(model: string) {
   return {
     model,
-    temperature: 0.1,
+    temperature: OBSERVER_TEMPERATURE,
     prompt: OBSERVER_PROMPT,
-    description:
-      'Visual analysis. Use for interpreting images, screenshots, PDFs, and diagrams — extracts structured observations without loading raw files into main context. Requires a vision-capable model.',
+    description: OBSERVER_DESCRIPTION,
     mode: 'subagent' as const,
   };
+}
+
+/** The observer agent system prompt (V1 `prompt` field / V2 `system` field). */
+export const OBSERVER_PROMPT_TEXT = OBSERVER_PROMPT;
+
+/**
+ * Parse a `provider/model` reference (with optional `#variant` suffix) into
+ * the `{ providerID, id, variant? }` object shape used by V2 `Agent.Info`.
+ */
+export function parseModelRef(ref: string): {
+  providerID: string;
+  id: string;
+  variant?: string;
+} {
+  const slash = ref.indexOf('/');
+  const providerID = slash === -1 ? 'openai' : ref.slice(0, slash);
+  let model = slash === -1 ? ref : ref.slice(slash + 1);
+  let variant: string | undefined;
+  const hash = model.indexOf('#');
+  if (hash !== -1) {
+    variant = model.slice(hash + 1);
+    model = model.slice(0, hash);
+  }
+  return { providerID, id: model, variant };
 }
